@@ -1792,6 +1792,15 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            for _rei_key, _rei_vals in reward_extra_infos_dict.items():
+                                if _rei_key in ("score", "feedback"):
+                                    continue
+                                try:
+                                    _nums = [float(v) for v in _rei_vals if v is not None]
+                                    if _nums:
+                                        metrics[f"{_rei_key}/mean"] = sum(_nums) / len(_nums)
+                                except (TypeError, ValueError):
+                                    pass
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
