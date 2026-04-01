@@ -80,7 +80,10 @@ class SelfDistillationConfig(BaseConfig):
     )
     solution_template: str = (
         "\n"
-        "Correct solution:\n\n"
+        "Here is one valid solution from a peer attempt. "
+        "Note that there may be multiple correct approaches \u2014 "
+        "different structures, orderings, or strategies can produce "
+        "the same correct result:\n\n"
         "{successful_previous_attempt}\n\n"
     )
     feedback_template: str = (
