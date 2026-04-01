@@ -719,7 +719,8 @@ class RayPPOTrainer:
             # build solution section
             solution_section = ""
             if has_solution:
-                solution_section = self_distillation_cfg.solution_template.format(
+                tpl = os.environ.get("SDPO_SOLUTION_TEMPLATE") or self_distillation_cfg.solution_template
+                solution_section = tpl.format(
                     successful_previous_attempt=solution_strs[i]
                 )
 
