@@ -364,10 +364,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
 
-        # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        lora_adapter_path = self.config.model.get("lora_adapter_path")
+        # Warm-start LoRA loads need real tensors before PEFT copies adapter weights in.
+        use_meta_tensor = not actor_model_config.tie_word_embeddings and lora_adapter_path is None
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta_tensor, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -437,7 +437,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             print("Applying LoRA to actor module")
             actor_module.enable_input_require_grads()
 
-            lora_adapter_path = self.config.model.get("lora_adapter_path")
             if lora_adapter_path is not None:
                 from peft import PeftModel
 
@@ -447,10 +446,32 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
 
                 actor_module = PeftModel.from_pretrained(actor_module, local_adapter_path, is_trainable=True)
+                meta_lora_params = [
+                    name
+                    for name, param in actor_module.named_parameters()
+                    if "lora_" in name and getattr(param, "is_meta", False)
+                ]
+                if meta_lora_params:
+                    raise RuntimeError(
+                        f"Pre-trained LoRA adapter did not materialize on {role}; "
+                        f"meta params remain: {meta_lora_params[:5]}"
+                    )
                 peft_config = actor_module.peft_config["default"]
                 # Ensure task_type is TaskType enum, not string
                 if isinstance(peft_config.task_type, str):
                     peft_config.task_type = TaskType.CAUSAL_LM
+
+                cfg_alpha = self.config.model.get("lora_alpha")
+                if cfg_alpha is not None and cfg_alpha != peft_config.lora_alpha:
+                    print(
+                        f"[LoRA] Overriding adapter lora_alpha: "
+                        f"{peft_config.lora_alpha} -> {cfg_alpha} (from config)"
+                    )
+                    peft_config.lora_alpha = cfg_alpha
+                    peft_config.scaling = {
+                        k: cfg_alpha / peft_config.r
+                        for k in peft_config.scaling
+                    }
 
             else:
                 # Convert config to regular Python types before creating PEFT model
@@ -1348,9 +1369,9 @@ class CriticWorker(Worker, DistProfilerExtension):
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
             critic_model_config.text_config.topk_method = "greedy"
 
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not critic_model_config.tie_word_embeddings, mesh=self.device_mesh
-        )
+        lora_adapter_path = self.config.model.get("lora_adapter_path")
+        use_meta_tensor = not critic_model_config.tie_word_embeddings and lora_adapter_path is None
+        init_context = get_init_weight_context_manager(use_meta_tensor=use_meta_tensor, mesh=self.device_mesh)
 
         # TiledMLP configuration for memory-efficient MLP computation
         tiled_mlp_config = config.model.get("tiled_mlp", {})
@@ -1395,7 +1416,6 @@ class CriticWorker(Worker, DistProfilerExtension):
             critic_module.enable_input_require_grads()
 
             # Check if we should load a pre-trained LoRA adapter
-            lora_adapter_path = self.config.model.get("lora_adapter_path")
             if lora_adapter_path is not None:
                 from peft import PeftModel
 
@@ -1405,11 +1425,33 @@ class CriticWorker(Worker, DistProfilerExtension):
                 local_adapter_path = copy_to_local(lora_adapter_path, use_shm=self.config.model.get("use_shm", False))
 
                 critic_module = PeftModel.from_pretrained(critic_module, local_adapter_path, is_trainable=True)
+                meta_lora_params = [
+                    name
+                    for name, param in critic_module.named_parameters()
+                    if "lora_" in name and getattr(param, "is_meta", False)
+                ]
+                if meta_lora_params:
+                    raise RuntimeError(
+                        "Pre-trained LoRA adapter did not materialize on critic; "
+                        f"meta params remain: {meta_lora_params[:5]}"
+                    )
                 peft_config = critic_module.peft_config["default"]
                 # Ensure task_type is TaskType enum, not string
                 # Use TOKEN_CLS for Critic since it's loaded as AutoModelForTokenClassification
                 if isinstance(peft_config.task_type, str):
                     peft_config.task_type = TaskType.TOKEN_CLS
+
+                cfg_alpha = self.config.model.get("lora_alpha")
+                if cfg_alpha is not None and cfg_alpha != peft_config.lora_alpha:
+                    print(
+                        f"[LoRA] Overriding critic adapter lora_alpha: "
+                        f"{peft_config.lora_alpha} -> {cfg_alpha} (from config)"
+                    )
+                    peft_config.lora_alpha = cfg_alpha
+                    peft_config.scaling = {
+                        k: cfg_alpha / peft_config.r
+                        for k in peft_config.scaling
+                    }
 
             else:
                 # Convert config to regular Python types before creating PEFT model
